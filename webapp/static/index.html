@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Weather & Air Quality Station</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.3/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0f172a;
+    --panel: #1e293b;
+    --panel-2: #16213a;
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+    --accent: #38bdf8;
+    --good: #22c55e;
+    --bad: #ef4444;
+    --warn: #f59e0b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 24px;
+  }
+  header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+  h1 { font-size: 22px; margin: 0; }
+  select, button {
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid #334155;
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-size: 14px;
+  }
+  .station-info {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    align-items: center;
+    color: var(--muted);
+    font-size: 13px;
+    margin-bottom: 16px;
+  }
+  .status-pill {
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-weight: 600;
+    font-size: 12px;
+  }
+  .status-ONLINE { background: rgba(34,197,94,0.15); color: var(--good); }
+  .status-OFFLINE { background: rgba(239,68,68,0.15); color: var(--bad); }
+  .status-UNKNOWN, .status-NODATA { background: rgba(245,158,11,0.15); color: var(--warn); }
+
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 14px;
+    margin-bottom: 24px;
+  }
+  .card {
+    background: var(--panel);
+    border-radius: 14px;
+    padding: 18px;
+    text-align: center;
+  }
+  .card .label { color: var(--muted); font-size: 13px; margin-bottom: 6px; }
+  .card .value { font-size: 30px; font-weight: 700; }
+  .card .unit { font-size: 14px; color: var(--muted); margin-left: 4px; }
+
+  .charts {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 16px;
+  }
+  .chart-box {
+    background: var(--panel-2);
+    border-radius: 14px;
+    padding: 16px;
+  }
+  .chart-box h3 { margin: 0 0 10px 0; font-size: 14px; color: var(--muted); }
+  canvas { max-height: 260px; }
+
+  .empty-state {
+    color: var(--muted);
+    text-align: center;
+    padding: 60px 0;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🌤️ Weather & Air Quality Station</h1>
+  <div>
+    <select id="stationSelect"></select>
+    <select id="limitSelect">
+      <option value="10">Last 10</option>
+      <option value="50" selected>Last 50</option>
+      <option value="100">Last 100</option>
+    </select>
+  </div>
+</header>
+
+<div class="station-info">
+  <span id="stationLabel">Station: —</span>
+  <span id="statusPill" class="status-pill status-UNKNOWN">NO DATA</span>
+  <span id="lastUpdate">Last Update: —</span>
+</div>
+
+<div id="content">
+  <div class="cards">
+    <div class="card"><div class="label">Temperature</div><div class="value"><span id="tempVal">--</span><span class="unit">°C</span></div></div>
+    <div class="card"><div class="label">Humidity</div><div class="value"><span id="humVal">--</span><span class="unit">%</span></div></div>
+    <div class="card"><div class="label">PM2.5</div><div class="value"><span id="pmVal">--</span><span class="unit">µg/m³</span></div></div>
+  </div>
+
+  <div class="charts">
+    <div class="chart-box"><h3>Temperature vs Time (°C)</h3><canvas id="tempChart"></canvas></div>
+    <div class="chart-box"><h3>Humidity vs Time (%)</h3><canvas id="humChart"></canvas></div>
+    <div class="chart-box"><h3>PM2.5 vs Time (µg/m³)</h3><canvas id="pmChart"></canvas></div>
+  </div>
+</div>
+
+<script>
+const REFRESH_MS = 5000; // FR-18: Refresh Interval <= 5 seconds
+
+const stationSelect = document.getElementById('stationSelect');
+const limitSelect = document.getElementById('limitSelect');
+const stationLabel = document.getElementById('stationLabel');
+const statusPill = document.getElementById('statusPill');
+const lastUpdate = document.getElementById('lastUpdate');
+const tempVal = document.getElementById('tempVal');
+const humVal = document.getElementById('humVal');
+const pmVal = document.getElementById('pmVal');
+
+let charts = {};
+let currentStation = null;
+
+function makeChart(ctx, label, color) {
+  return new Chart(ctx, {
+    type: 'line',
+    data: { labels: [], datasets: [{ label, data: [], borderColor: color, backgroundColor: color + '33', tension: 0.3, pointRadius: 2, fill: true }] },
+    options: {
+      responsive: true,
+      animation: false,
+      scales: {
+        x: { ticks: { color: '#94a3b8', maxRotation: 0, autoSkip: true }, grid: { color: '#334155' } },
+        y: { ticks: { color: '#94a3b8' }, grid: { color: '#334155' } }
+      },
+      plugins: { legend: { display: false } }
+    }
+  });
+}
+
+function initCharts() {
+  charts.temp = makeChart(document.getElementById('tempChart'), 'Temperature', '#38bdf8');
+  charts.hum = makeChart(document.getElementById('humChart'), 'Humidity', '#22c55e');
+  charts.pm = makeChart(document.getElementById('pmChart'), 'PM2.5', '#f59e0b');
+}
+
+function fmtTime(iso) {
+  try {
+    const d = new Date(iso);
+    return d.toLocaleTimeString();
+  } catch { return iso; }
+}
+
+async function loadStations() {
+  try {
+    const res = await fetch('/api/stations');
+    const stations = await res.json();
+    const prev = stationSelect.value;
+    stationSelect.innerHTML = '';
+    stations.forEach(s => {
+      const opt = document.createElement('option');
+      opt.value = s; opt.textContent = s;
+      stationSelect.appendChild(opt);
+    });
+    if (stations.includes(prev)) stationSelect.value = prev;
+    currentStation = stationSelect.value || null;
+  } catch (e) {
+    console.error('Failed to load stations', e);
+  }
+}
+
+async function refreshLatest() {
+  if (!currentStation) return;
+  stationLabel.textContent = `Station: ${currentStation}`;
+  try {
+    const res = await fetch(`/api/stations/${currentStation}/latest`);
+    if (res.status === 404) {
+      statusPill.textContent = 'NO DATA';
+      statusPill.className = 'status-pill status-NODATA';
+      tempVal.textContent = humVal.textContent = pmVal.textContent = '--';
+      lastUpdate.textContent = 'Last Update: —';
+      return;
+    }
+    const data = await res.json();
+    tempVal.textContent = data.temperature.toFixed(1);
+    humVal.textContent = data.humidity.toFixed(1);
+    pmVal.textContent = data.pm25.toFixed(1);
+    lastUpdate.textContent = `Last Update: ${fmtTime(data.received_at)}`;
+    statusPill.textContent = data.status;
+    statusPill.className = `status-pill status-${data.status}`;
+  } catch (e) {
+    console.error('Failed to load latest data', e);
+  }
+}
+
+async function refreshHistory() {
+  if (!currentStation) return;
+  const limit = limitSelect.value;
+  try {
+    const res = await fetch(`/api/stations/${currentStation}/history?limit=${limit}`);
+    const data = await res.json();
+    const labels = data.map(d => fmtTime(d.received_at));
+    charts.temp.data.labels = labels;
+    charts.temp.data.datasets[0].data = data.map(d => d.temperature);
+    charts.temp.update();
+
+    charts.hum.data.labels = labels;
+    charts.hum.data.datasets[0].data = data.map(d => d.humidity);
+    charts.hum.update();
+
+    charts.pm.data.labels = labels;
+    charts.pm.data.datasets[0].data = data.map(d => d.pm25);
+    charts.pm.update();
+  } catch (e) {
+    console.error('Failed to load history', e);
+  }
+}
+
+async function tick() {
+  await refreshLatest();
+  await refreshHistory();
+}
+
+stationSelect.addEventListener('change', () => {
+  currentStation = stationSelect.value;
+  tick();
+});
+limitSelect.addEventListener('change', tick);
+
+(async function start() {
+  initCharts();
+  await loadStations();
+  await tick();
+  setInterval(async () => {
+    await loadStations();
+    await tick();
+  }, REFRESH_MS);
+})();
+</script>
+
+</body>
+</html>

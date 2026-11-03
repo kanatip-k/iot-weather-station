@@ -1,0 +1,59 @@
+version: "3.9"
+
+services:
+  mqtt:
+    image: eclipse-mosquitto:2
+    container_name: weather_mqtt
+    restart: unless-stopped
+    ports:
+      - "${MQTT_HOST_PORT:-1883}:1883"
+    volumes:
+      - ./mqtt/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquitto_data:/mosquitto/data
+      - mosquitto_log:/mosquitto/log
+
+  mongodb:
+    image: mongo:7
+    container_name: weather_mongodb
+    restart: unless-stopped
+    environment:
+      - MONGO_INITDB_DATABASE=${MONGO_DB_NAME:-weather_db}
+    volumes:
+      - mongo_data:/data/db
+    # Internal only — not exposed publicly (see SRS Firewall Requirement)
+    expose:
+      - "27017"
+
+  collector:
+    build: ./collector
+    container_name: weather_collector
+    restart: unless-stopped
+    depends_on:
+      - mqtt
+      - mongodb
+    environment:
+      - MQTT_BROKER=mqtt
+      - MQTT_PORT=1883
+      - MQTT_TOPIC=${MQTT_TOPIC:-weather/+/data}
+      - MONGO_URL=mongodb://mongodb:27017
+      - MONGO_DB_NAME=${MONGO_DB_NAME:-weather_db}
+      - MONGO_COLLECTION=${MONGO_COLLECTION:-weather_readings}
+
+  webapp:
+    build: ./webapp
+    container_name: weather_webapp
+    restart: unless-stopped
+    depends_on:
+      - mongodb
+    environment:
+      - MONGO_URL=mongodb://mongodb:27017
+      - MONGO_DB_NAME=${MONGO_DB_NAME:-weather_db}
+      - MONGO_COLLECTION=${MONGO_COLLECTION:-weather_readings}
+      - ONLINE_THRESHOLD_SECONDS=${ONLINE_THRESHOLD_SECONDS:-30}
+    ports:
+      - "${WEBAPP_HOST_PORT:-8000}:8000"
+
+volumes:
+  mongo_data:
+  mosquitto_data:
+  mosquitto_log:
